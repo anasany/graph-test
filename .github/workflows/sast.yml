@@ -1,0 +1,74 @@
+name: Static Application Security Testing (SAST)
+
+on:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * 1'
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  sast:
+    name: SAST (test-golang)
+    runs-on: ubuntu-latest
+    env:
+      # --- what to scan ---
+      PROJECT: ./test-golang
+
+      # --- rulesets: Go project, so language packs beyond the generic ones are
+      #     pulled from the registry via "auto". See README for the full list. ---
+      SEMGREP_CONFIG_RULESETS: >-
+        ${{ github.workspace }}/../tools/semgrep-rules/go
+        ${{ github.workspace }}/../tools/semgrep-rules/problem-based-packs
+        ${{ github.workspace }}/../tools/semgrep-rules/bash
+        ${{ github.workspace }}/../tools/semgrep-rules/package_managers
+        p/default auto
+
+      # --- paths to skip, relative to PROJECT ---
+      OPENGREP_EXCLUDE: "*.sarif go.sum internal/execution/runner_docker.go"
+
+      # --- output, relative to PROJECT ---
+      OPENGREP_SARIF_OUTPUT: sast-opengrep.sarif
+
+      # --- must be unique per job ---
+      SARIF_CATEGORY: sast-test-golang
+      ARTIFACT_NAME: sast-report-test-golang
+
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          # renovate: datasource=python-version depName=python
+          python-version: '3.14.4'
+
+      # Rules are cloned outside the checkout: semgrep's community rules ships many of  deliberately-vulnerable fixtures,
+      - name: Install scanner and rules
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/../tools" && cd "$GITHUB_WORKSPACE/../tools"
+          bash "$GITHUB_WORKSPACE/ci/setup-tools.sh" --install-tool opengrep,semgrep-rules
+
+      - name: Run SAST scan
+        working-directory: ${{ env.PROJECT }}
+        run: python3 "$GITHUB_WORKSPACE/ci/sast_scan.py"
+
+      - name: Upload SARIF to GitHub Security tab
+        if: ${{ !cancelled() && hashFiles(format('{0}/{1}', env.PROJECT, env.OPENGREP_SARIF_OUTPUT)) != '' }}
+        uses: github/codeql-action/upload-sarif@4e94bd11f71e507f7f87df81788dff88d1dacbfb # v4.31.2
+        with:
+          sarif_file: ${{ env.PROJECT }}/${{ env.OPENGREP_SARIF_OUTPUT }}
+          category: ${{ env.SARIF_CATEGORY }}
+
+      - name: Upload SARIF artifact
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.PROJECT }}/*.sarif
+          retention-days: 30
+          if-no-files-found: warn
